@@ -1,0 +1,23 @@
+name: tessell8er
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - jupyterlab
+  - numpy
+  - pandas
+  - dask
+  - scipy
+  - shapely
+  - scikit-image
+  - lxml
+  - zarr
+  - tifffile
+  - napari
+  - tqdm
+  - ipywidgets
+  - seaborn
+  - matplotlib
+  - pip
+  - pip:
+      - .

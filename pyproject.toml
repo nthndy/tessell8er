@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tessell8er"
+version = "0.1.0"
+description = "Lazy Dask-based image tiling and stitching for Harmony/Opera Phenix microscopy data."
+authors = [{ name = "Nathan J. Day", email = "nathan.day@crick.ac.uk" }]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "dask[array]",
+    "scipy",
+    "shapely",
+    "scikit-image",
+    "lxml",
+    "zarr",
+    "tifffile",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+viz = ["napari", "matplotlib", "seaborn", "ipywidgets"]
+dev = ["pre-commit", "pytest", "jupyterlab"]
+
+[project.urls]
+Homepage = "https://github.com/nthndy/tessell8er"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tessell8er*"]

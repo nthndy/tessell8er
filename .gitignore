@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.tiff
+*.tif
+*.zarr
+*.h5
+*.hdf5
+.DS_Store
+.ipynb_checkpoints/
+*.ome.tiff
+data/
+!data/.gitkeep
