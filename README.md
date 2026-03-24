@@ -75,7 +75,6 @@ tessell8er/
 │   └── dataio.py     # Harmony metadata I/O
 ├── notebooks/
 │   └── tile_image.ipynb
-├── data/             # Place example data here
 ├── environment.yml
 ├── pyproject.toml
 └── README.md
