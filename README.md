@@ -1,7 +1,9 @@
 # tessell8er
 > *Tessellate the image — just not yet.*
 
-![tessell8er](tessell8er.gif)
+<p align="center">
+  <img src="tessell8er.gif" alt="tessell8er"/>
+</p>
 
 **tessell8er** is a lightweight Python package for lazily stitching fragmented microscopy image tiles — exported from [Harmony/Opera Phenix](https://www.revvity.com/) — into a single [Dask](https://www.dask.org/) array. Computation is deferred until you explicitly call `.compute()`, keeping memory usage minimal regardless of mosaic size.
 
