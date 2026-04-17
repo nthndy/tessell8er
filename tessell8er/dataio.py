@@ -196,6 +196,137 @@ def read_harmony_assaylayout(
     return df.dropna()
 
 
+def read_ffc_profile(
+    ffc_xml_path: str | Path,
+) -> dict[int, np.ndarray]:
+    """Parse a Harmony FFC profile XML and reconstruct the flatfield correction
+    surface for each channel as a 2D numpy array.
+
+    Harmony stores the illumination profile as a 2D polynomial surface defined
+    by a triangular coefficient matrix. Pixel coordinates are normalised to a
+    centred unit space before evaluation using the Origin and Scale fields.
+
+    Parameters
+    ----------
+    ffc_xml_path : str or Path
+        Path to the FFC profile XML file
+        (e.g. ``FFC_Profile/FFC_Profile_Measurement 1.xml``).
+
+    Returns
+    -------
+    dict[int, np.ndarray]
+        Mapping of channel ID (1-based int) to a 2D float32 surface array
+        of shape (height, width) normalised so its mean equals 1.0.
+        Dividing a raw tile by this surface corrects for uneven illumination.
+
+    Notes
+    -----
+    The polynomial is evaluated as a sum over triangular index pairs (i, j)
+    where i + j <= degree, with normalised coordinates:
+
+        x_norm = (x - origin_x) * scale_x
+        y_norm = (y - origin_y) * scale_y
+        surface += coeff[i][j] * x_norm^i * y_norm^j
+    """
+    import ast
+    import re
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(ffc_xml_path)
+    root = tree.getroot()
+    ns = {'h': 'http://www.perkinelmer.com/PEHH/HarmonyV5'}
+
+    surfaces = {}
+
+    for entry in root.findall('.//h:Entry', ns):
+        channel_id = int(entry.get('ChannelID'))
+        profile_text = entry.find('h:FlatfieldProfile', ns).text
+
+        # Extract polynomial coefficients
+        coeffs_match = re.search(r'Coefficients:\s*(\[\[.*?\]\])', profile_text)
+        dims_match = re.search(r'Dims:\s*\[(\d+),\s*(\d+)\]', profile_text)
+        origin_match = re.search(r'Origin:\s*\[([0-9.]+),\s*([0-9.]+)\]', profile_text)
+        scale_match = re.search(r'Scale:\s*\[([0-9.E\-]+),\s*([0-9.E\-]+)\]', profile_text)
+
+        coeffs = ast.literal_eval(coeffs_match.group(1))
+        height, width = int(dims_match.group(1)), int(dims_match.group(2))
+        origin_y, origin_x = float(origin_match.group(1)), float(origin_match.group(2))
+        scale_y, scale_x = float(scale_match.group(1)), float(scale_match.group(2))
+
+        # Build normalised coordinate grids
+        ys = (np.arange(height) - origin_y) * scale_y
+        xs = (np.arange(width)  - origin_x) * scale_x
+        X, Y = np.meshgrid(xs, ys)
+
+        # Evaluate triangular 2D polynomial
+        # coeffs[i][j] corresponds to x^i * y^j
+        surface = np.zeros((height, width), dtype=np.float32)
+        for i, row in enumerate(coeffs):
+            for j, coeff in enumerate(row):
+                surface += coeff * (X ** i) * (Y ** j)
+
+        # Normalise so mean == 1 to preserve overall intensity
+        surface /= surface.mean()
+        surfaces[channel_id] = surface
+
+    return surfaces
+
+
+def make_ffc_transform(
+    surface: np.ndarray,
+) -> "Callable[[np.ndarray], np.ndarray]":
+    """Create a per-tile FFC correction function for use as an input transform
+    in :func:`tessell8er.tile.compile_mosaic`.
+
+    The returned function divides each tile by the flatfield surface,
+    correcting for uneven illumination (vignetting) introduced by the optics.
+
+    Parameters
+    ----------
+    surface : np.ndarray
+        2D flatfield surface array as returned by :func:`read_ffc_profile`,
+        shape (H, W), normalised so its mean equals 1.0.
+
+    Returns
+    -------
+    Callable[[np.ndarray], np.ndarray]
+        A function that accepts a tile array and returns the corrected tile
+        as the same dtype, clipped to the valid range for that dtype.
+
+    Examples
+    --------
+    Parse the FFC profile, build per-channel transforms, then pass to
+    compile_mosaic:
+
+    >>> from tessell8er import dataio, tile
+    >>> surfaces = dataio.read_ffc_profile('FFC_Profile/FFC_Profile_Measurement 1.xml')
+    >>> # For a single-channel call, pick the relevant surface
+    >>> ffc_fn = dataio.make_ffc_transform(surfaces[3])  # channel 3
+    >>> mosaic = tile.compile_mosaic(
+    ...     image_dir='path/to/Images/',
+    ...     metadata=metadata,
+    ...     row=2, col=1,
+    ...     set_channel=3,
+    ...     input_transforms=[ffc_fn],
+    ... )
+    """
+    def _apply_ffc(tile: np.ndarray) -> np.ndarray:
+        dtype = tile.dtype
+        # Crop or pad surface to match tile size if needed
+        h, w = tile.shape[:2]
+        s = surface[:h, :w]
+        # Avoid division by zero
+        s = np.where(s == 0, 1.0, s)
+        corrected = tile.astype(np.float32) / s
+        # Clip to valid dtype range and restore original dtype
+        if np.issubdtype(dtype, np.integer):
+            info = np.iinfo(dtype)
+            corrected = np.clip(corrected, info.min, info.max)
+        return corrected.astype(dtype)
+
+    return _apply_ffc
+
+
 # ---------------------------------------------------------------------------
 # URL / filename utilities
 # ---------------------------------------------------------------------------
