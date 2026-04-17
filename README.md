@@ -82,6 +82,47 @@ tessell8er/
 
 ---
 
+## Flat-field correction
+ 
+tessell8er supports automatic flat-field correction (FFC) using illumination profiles exported by Harmony/Opera Phenix. FFC corrects for vignetting — the systematic intensity gradient introduced by the microscope optics that causes the centre of each tile to appear brighter than the edges.
+ 
+This is particularly important for **fluorescence intensity-based measurements** (e.g. spot detection, area quantification, morphometrics) across compiled mosaics. Without correction, cells near tile edges will have artificially lower signal than cells at tile centres, introducing a systematic spatial bias into downstream analysis.
+ 
+### How it works
+ 
+Harmony exports the illumination profile as a 2D polynomial surface per channel in an XML file (`FFC_Profile/FFC_Profile_Measurement 1.xml`). tessell8er parses this file, reconstructs the polynomial surface for each channel, and divides each tile by its corresponding surface before stitching. Correction is applied lazily — only when `.compute()` is called.
+ 
+### Usage
+ 
+```python
+from tessell8er import dataio, tile
+ 
+# Parse the FFC profile — returns a dict of {channel_id: surface_array}
+surfaces = dataio.read_ffc_profile('path/to/FFC_Profile/FFC_Profile_Measurement 1.xml')
+ 
+# Build a correction function for the channel of interest
+ffc_fn = dataio.make_ffc_transform(surfaces[3])  # channel 3 (1-based)
+ 
+# Pass as input_transforms to compile_mosaic
+mosaic = tile.compile_mosaic(
+    image_dir='path/to/Images/',
+    metadata=metadata,
+    row=2,
+    col=1,
+    set_channel=3,
+    input_transforms=[ffc_fn],
+)
+```
+ 
+### Notes
+ 
+- Channel IDs are 1-based, matching Harmony's channel numbering
+- The correction surface is normalised so its mean equals 1.0 — overall intensity is preserved
+- If no FFC profile is available, simply omit `input_transforms` and stitching proceeds uncorrected
+- Multiple transforms can be chained via `input_transforms=[fn1, fn2, ...]` — FFC should be applied first
+
+---
+
 ## Acknowledgements
 
 Parts of the tiling pipeline were adapted from [Volker Hilsenstein's DaskFusion project](https://github.com/VolkerH/DaskFusion), used under the MIT License.
