@@ -14,3 +14,5 @@ build/
 *.ome.tiff
 data/
 !data/.gitkeep
+*.png
+ffc_test.py
