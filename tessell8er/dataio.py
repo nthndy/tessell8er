@@ -243,10 +243,10 @@ def read_ffc_profile(
         profile_text = entry.find('h:FlatfieldProfile', ns).text
 
         # Extract polynomial coefficients
-        coeffs_match = re.search(r'Coefficients:\s*(\[\[.*?\]\])', profile_text)
-        dims_match = re.search(r'Dims:\s*\[(\d+),\s*(\d+)\]', profile_text)
-        origin_match = re.search(r'Origin:\s*\[([0-9.]+),\s*([0-9.]+)\]', profile_text)
-        scale_match = re.search(r'Scale:\s*\[([0-9.E\-]+),\s*([0-9.E\-]+)\]', profile_text)
+        coeffs_match = re.search(r'Coefficients:\s*(\[\[.*?\]\])', profile_text, re.DOTALL)
+        dims_match   = re.search(r'Dims:\s*\[(\d+),\s*(\d+)\]',   profile_text, re.DOTALL)
+        origin_match = re.search(r'Origin:\s*\[([0-9.]+),\s*([0-9.]+)\]', profile_text, re.DOTALL)
+        scale_match  = re.search(r'Scale:\s*\[([0-9.E\-]+),\s*([0-9.E\-]+)\]', profile_text, re.DOTALL)
 
         coeffs = ast.literal_eval(coeffs_match.group(1))
         height, width = int(dims_match.group(1)), int(dims_match.group(2))
