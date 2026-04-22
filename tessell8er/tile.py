@@ -157,9 +157,14 @@ def compile_mosaic(
     plane_IDs   = metadata['PlaneID'].unique()   if set_plane   is None else [set_plane]
     timepoint_IDs = metadata['TimepointID'].unique() if set_time is None else [set_time]
 
-    sample_fn = metadata['URL'][
+    candidate_urls = metadata['URL'][
         (metadata['Row'] == str(row)) & (metadata['Col'] == str(col))
-    ].iloc[0]
+    ].tolist()
+    sample_fn = next(
+        (fn for fn in candidate_urls if (Path(image_dir) / fn).exists()), None
+    )
+    if sample_fn is None:
+        raise FileNotFoundError(f"No valid sample TIFF found for r{row}c{col} in {image_dir}")
     dtype = imread(image_dir + f'/{sample_fn}').dtype
 
     number_tiles = len(subset_field_IDs) if subset_field_IDs else int(metadata['FieldID'].max())
