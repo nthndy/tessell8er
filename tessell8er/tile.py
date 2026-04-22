@@ -258,7 +258,8 @@ def stitch(
 
     fns = filtered_df['URL']
     find_files_exist(fns, image_dir)
-    fns = [glob.glob(os.path.join(image_dir, fn))[0] for fn in fns]
+    fns = [glob.glob(os.path.join(image_dir, fn))[0] for fn in fns
+           if os.path.exists(os.path.join(image_dir, fn))]
 
     sample = imread(fns[0])
     _fuse_func = partial(fuse_func, imload_fn=load_transform_image, dtype=sample.dtype)
