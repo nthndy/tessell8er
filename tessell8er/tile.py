@@ -73,7 +73,10 @@ def find_files_exist(fns: list[str], image_dir: str) -> None:
     for fn in fns:
         file_path = os.path.join(image_dir, fn)
         if not os.path.exists(file_path):
-            raise FileNotFoundError(f"The file '{file_path}' does not exist.")
+            import logging
+            logging.getLogger("tessell8er").warning(
+                f"Expected file not found, skipping: '{file_path}'"
+            )
 
 
 def compile_mosaic(
