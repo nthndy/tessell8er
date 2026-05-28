@@ -328,6 +328,94 @@ def make_ffc_transform(
 
 
 # ---------------------------------------------------------------------------
+# OME-NGFF Zarr export
+# ---------------------------------------------------------------------------
+
+def write_ome_zarr(
+    image: "ArrayLike",
+    output_path: "str | Path",
+    scale: "tuple[float, ...]" = (1.0, 1.0, 1.0, 1.0, 1.0),
+    chunks: "tuple[int, ...]" = (1, 1, 1, 256, 256),
+    compressor=None,
+    overwrite: bool = True,
+) -> None:
+    """Write a TCZYX image array to an OME-NGFF v0.4 compliant Zarr store.
+
+    Uses ome-zarr-py to write correct multiscales metadata and chunk
+    structure. Compatible with napari-ome-zarr, Fiji/BigDataViewer, and
+    other OME-NGFF-aware readers.
+
+    Parameters
+    ----------
+    image : array-like
+        TCZYX image array (numpy or dask).
+    output_path : str or Path
+        Destination ``.zarr`` directory path.
+    scale : tuple[float, ...]
+        Physical pixel scales in (t, c, z, y, x) order. Spatial axes
+        should be in micrometres (default all 1.0).
+    chunks : tuple[int, ...]
+        Chunk shape in TCZYX order (default (1, 1, 1, 256, 256)).
+    compressor : numcodecs compressor or None
+        Zarr compressor; ``None`` disables compression (default).
+    overwrite : bool
+        If True, remove any existing store at ``output_path`` before
+        writing (default True).
+
+    Raises
+    ------
+    ImportError
+        If ``ome-zarr`` is not installed.
+    One coordinate transformation is generated per pyramid level. ome-zarr
+    halves XY at each level until the smallest spatial dimension is < 64px;
+    the physical scales are propagated accordingly across all levels.
+    """
+    import math
+    import shutil
+
+    import ome_zarr.io
+    import ome_zarr.writer
+    import zarr
+
+    output_path = Path(output_path)
+    if overwrite and output_path.exists():
+        shutil.rmtree(output_path)
+
+    # Match ome-zarr's default pyramid depth: halve XY until min dim < 64px
+    min_dim = min(image.shape[-2], image.shape[-1])
+    n_levels = max(1, math.floor(math.log2(min_dim / 64)) + 1)
+
+    # One transform per pyramid level; XY scale doubles at each level
+    coordinate_transformations = [
+        [{"type": "scale", "scale": [
+            scale[0],
+            scale[1],
+            scale[2],
+            scale[3] * (2 ** i),
+            scale[4] * (2 ** i),
+        ]}]
+        for i in range(n_levels)
+    ]
+
+    loc = ome_zarr.io.parse_url(str(output_path), mode='w')
+    grp = zarr.group(loc.store)
+
+    ome_zarr.writer.write_image(
+        image=image,
+        group=grp,
+        axes=[
+            {"name": "t", "type": "time",    "unit": "second"},
+            {"name": "c", "type": "channel"},
+            {"name": "z", "type": "space",   "unit": "micrometer"},
+            {"name": "y", "type": "space",   "unit": "micrometer"},
+            {"name": "x", "type": "space",   "unit": "micrometer"},
+        ],
+        coordinate_transformations=coordinate_transformations,
+        storage_options={"chunks": chunks, "compressor": compressor},
+    )
+
+
+# ---------------------------------------------------------------------------
 # URL / filename utilities
 # ---------------------------------------------------------------------------
 

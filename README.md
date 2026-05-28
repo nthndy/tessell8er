@@ -36,6 +36,12 @@ mamba env create -f environment.yml
 mamba activate tessell8er
 ```
 
+Register it in your Jupyter Notebooks
+
+```bash
+python -m ipykernel install --user --name tessell8er --display-name "tessell8er"
+```
+
 ---
 
 ## Quick start

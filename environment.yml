@@ -2,7 +2,7 @@ name: tessell8er
 channels:
   - conda-forge
 dependencies:
-  - python=3.10
+  - python=3.11
   - jupyterlab
   - numpy
   - pandas
@@ -12,6 +12,7 @@ dependencies:
   - scikit-image
   - lxml
   - zarr
+  - ome-zarr
   - tifffile
   - napari
   - tqdm
@@ -21,3 +22,4 @@ dependencies:
   - pip
   - pip:
       - .
+ 

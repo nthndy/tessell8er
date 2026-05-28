@@ -21,6 +21,7 @@ dependencies = [
     "zarr",
     "tifffile",
     "tqdm",
+    "ome-zarr",
 ]
 
 [project.optional-dependencies]
