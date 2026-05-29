@@ -428,6 +428,7 @@ def write_plate_zarr(
     chunks: "tuple[int, ...]" = (1, 1, 1, 256, 256),
     n_tile_rows: int = 3,
     n_tile_cols: int = 3,
+    ffc_surfaces: "dict[int, np.ndarray] | None" = None,
     compressor=None,
 ) -> None:
     """Write a multi-well plate to an OME-NGFF v0.4 HCS compliant Zarr store.
@@ -463,6 +464,10 @@ def write_plate_zarr(
         Number of tile rows in each mosaic (default 3).
     n_tile_cols : int
         Number of tile columns in each mosaic (default 3).
+    ffc_surfaces : dict[int, np.ndarray] or None
+        Flatfield correction surfaces as returned by
+        :func:`~tessell8er.dataio.read_ffc_profile`, keyed by 1-based
+        channel ID. If None, no correction is applied (default).
     compressor : numcodecs compressor or None
         Zarr compressor; ``None`` disables compression (default).
     """
@@ -485,6 +490,8 @@ def write_plate_zarr(
     print(f"Wells found  : {len(wells)}")
     print(f"Rows         : {rows_sorted}")
     print(f"Cols         : {cols_sorted}")
+    print(f"FFC          : {'enabled' if ffc_surfaces is not None else 'disabled'}")
+    print(f"Assay layout : {'provided' if assay_layout is not None else 'not provided'}")
 
     loc  = ome_zarr.io.parse_url(str(output_path), mode='w')
     root = zarr.group(loc.store)
@@ -528,6 +535,19 @@ def write_plate_zarr(
             print(f"  [{row},{col}] Partial write detected, cleaning up...")
             shutil.rmtree(field_path)
 
+        # Build FFC input transforms for this well's channels if provided
+        input_transforms = None
+        if ffc_surfaces is not None:
+            channel_ids = metadata[
+                (metadata['Row'] == row) & (metadata['Col'] == col)
+            ]['ChannelID'].unique()
+            input_transforms = [
+                make_ffc_transform(ffc_surfaces[int(ch)])
+                for ch in channel_ids
+                if int(ch) in ffc_surfaces
+            ]
+            print(f"  [{row},{col}] FFC applied to channels: {list(channel_ids)}")
+
         print(f"  [{row},{col}] Compiling mosaic...")
         images = tile_module.compile_mosaic(
             image_dir=image_dir,
@@ -535,22 +555,19 @@ def write_plate_zarr(
             row=int(row), col=int(col),
             n_tile_rows=n_tile_rows,
             n_tile_cols=n_tile_cols,
+            input_transforms=input_transforms,
         )
         print(f"  [{row},{col}] Mosaic shape: {images.shape}, dtype: {images.dtype}")
 
+        # Write well-level metadata
+        well_grp = root.require_group(f'{row}/{col}')
+        well_attrs = {'well': {'version': '0.4', 'images': [{'path': '0', 'acquisition': 0}]}}
         if assay_layout is not None:
             layout_row = assay_layout.loc[(int(row), int(col))]
-            well_grp = root.require_group(f'{row}/{col}')
-            well_grp.attrs.update({
-                'well':      {'version': '0.4', 'images': [{'path': '0', 'acquisition': 0}]},
-                'condition': layout_row.to_dict(),
-            })
-        else:
-            well_grp = root.require_group(f'{row}/{col}')
-            well_grp.attrs.update({
-                'well': {'version': '0.4', 'images': [{'path': '0', 'acquisition': 0}]},
-            })
+            well_attrs['condition'] = layout_row.to_dict()
+        well_grp.attrs.update(well_attrs)
 
+        # Write image pyramid
         img_grp  = well_grp.require_group('0')
         min_dim  = min(images.shape[-2], images.shape[-1])
         n_levels = max(1, math.floor(math.log2(min_dim / 64)) + 1)
