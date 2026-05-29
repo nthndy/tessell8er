@@ -336,6 +336,7 @@ def write_ome_zarr(
     output_path: "str | Path",
     scale: "tuple[float, ...]" = (1.0, 1.0, 1.0, 1.0, 1.0),
     chunks: "tuple[int, ...]" = (1, 1, 1, 256, 256),
+    min_level_dim: int = 256,
     compressor=None,
     overwrite: bool = True,
 ) -> None:
@@ -345,10 +346,9 @@ def write_ome_zarr(
     structure. Compatible with napari-ome-zarr, Fiji/BigDataViewer, and
     other OME-NGFF-aware readers.
 
-    The pyramid is built via :class:`ome_zarr.scaler.Scaler` (lazy for
-    dask arrays) and passed directly to ``write_image``; the number of
-    coordinate transformations is derived from the pyramid length so it
-    always matches the number of resolution levels written.
+    The number of pyramid levels is derived from the smallest spatial
+    dimension, halving until it falls below ``min_level_dim``. Physical
+    scales are propagated across all levels via coordinate transformations.
 
     Parameters
     ----------
@@ -361,6 +361,10 @@ def write_ome_zarr(
         should be in micrometres (default all 1.0).
     chunks : tuple[int, ...]
         Chunk shape in TCZYX order (default (1, 1, 1, 256, 256)).
+    min_level_dim : int
+        Smallest spatial dimension permitted at the coarsest pyramid level
+        in pixels. Controls pyramid depth without hardcoding a level count
+        (default 256).
     compressor : numcodecs compressor or None
         Zarr compressor; ``None`` disables compression (default).
     overwrite : bool
@@ -372,24 +376,22 @@ def write_ome_zarr(
     ImportError
         If ``ome-zarr`` is not installed.
     """
+    import math
     import shutil
 
     import ome_zarr.io
     import ome_zarr.writer
     import zarr
-    from ome_zarr.scaler import Scaler
 
     output_path = Path(output_path)
     if overwrite and output_path.exists():
         shutil.rmtree(output_path)
 
-    # Build pyramid via the same Scaler ome-zarr uses internally;
-    # for dask arrays this is lazy — no compute triggered here.
-    scaler = Scaler()
-    pyramid = scaler.nearest(image)
-    n_levels = len(pyramid)
+    # Halve XY at each level until smallest spatial dim < min_level_dim
+    min_dim  = min(image.shape[-2], image.shape[-1])
+    n_levels = max(1, math.floor(math.log2(min_dim / min_level_dim)) + 1)
 
-    # One transform per level; XY scale doubles at each pyramid step
+    # One transform per level; XY scale doubles at each downsampling step
     coordinate_transformations = [
         [{"type": "scale", "scale": [
             scale[0],
@@ -405,8 +407,9 @@ def write_ome_zarr(
     grp = zarr.group(loc.store)
 
     ome_zarr.writer.write_image(
-        image=pyramid,          # pre-built pyramid skips internal rescaling
+        image=image,
         group=grp,
+        scale_factors=[2] * (n_levels - 1),
         axes=[
             {"name": "t", "type": "time",    "unit": "second"},
             {"name": "c", "type": "channel"},
@@ -429,6 +432,7 @@ def write_plate_zarr(
     n_tile_rows: int = 3,
     n_tile_cols: int = 3,
     ffc_surfaces: "dict[int, np.ndarray] | None" = None,
+    min_level_dim: int = 256,
     compressor=None,
 ) -> None:
     """Write a multi-well plate to an OME-NGFF v0.4 HCS compliant Zarr store.
@@ -468,6 +472,10 @@ def write_plate_zarr(
         Flatfield correction surfaces as returned by
         :func:`~tessell8er.dataio.read_ffc_profile`, keyed by 1-based
         channel ID. If None, no correction is applied (default).
+    min_level_dim : int
+        Smallest spatial dimension permitted at the coarsest pyramid level
+        in pixels. Controls pyramid depth without hardcoding a level count
+        (default 256).
     compressor : numcodecs compressor or None
         Zarr compressor; ``None`` disables compression (default).
     """
@@ -486,12 +494,13 @@ def write_plate_zarr(
     rows_sorted = sorted({r for r, _ in wells}, key=int)
     cols_sorted = sorted({c for _, c in wells}, key=int)
 
-    print(f"Output path  : {output_path}")
-    print(f"Wells found  : {len(wells)}")
-    print(f"Rows         : {rows_sorted}")
-    print(f"Cols         : {cols_sorted}")
-    print(f"FFC          : {'enabled' if ffc_surfaces is not None else 'disabled'}")
-    print(f"Assay layout : {'provided' if assay_layout is not None else 'not provided'}")
+    print(f"Output path   : {output_path}")
+    print(f"Wells found   : {len(wells)}")
+    print(f"Rows          : {rows_sorted}")
+    print(f"Cols          : {cols_sorted}")
+    print(f"FFC           : {'enabled' if ffc_surfaces is not None else 'disabled'}")
+    print(f"Assay layout  : {'provided' if assay_layout is not None else 'not provided'}")
+    print(f"Min level dim : {min_level_dim}px")
 
     loc  = ome_zarr.io.parse_url(str(output_path), mode='w')
     root = zarr.group(loc.store)
@@ -560,7 +569,7 @@ def write_plate_zarr(
         print(f"  [{row},{col}] Mosaic shape: {images.shape}, dtype: {images.dtype}")
 
         # Write well-level metadata
-        well_grp = root.require_group(f'{row}/{col}')
+        well_grp   = root.require_group(f'{row}/{col}')
         well_attrs = {'well': {'version': '0.4', 'images': [{'path': '0', 'acquisition': 0}]}}
         if assay_layout is not None:
             layout_row = assay_layout.loc[(int(row), int(col))]
@@ -570,8 +579,8 @@ def write_plate_zarr(
         # Write image pyramid
         img_grp  = well_grp.require_group('0')
         min_dim  = min(images.shape[-2], images.shape[-1])
-        n_levels = max(1, math.floor(math.log2(min_dim / 64)) + 1)
-        print(f"  [{row},{col}] Writing {n_levels} pyramid levels...")
+        n_levels = max(1, math.floor(math.log2(min_dim / min_level_dim)) + 1)
+        print(f"  [{row},{col}] Writing {n_levels} pyramid levels (min dim: {min_level_dim}px)...")
 
         coordinate_transformations = [
             [{'type': 'scale', 'scale': [
