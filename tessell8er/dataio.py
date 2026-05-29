@@ -345,6 +345,10 @@ def write_ome_zarr(
     structure. Compatible with napari-ome-zarr, Fiji/BigDataViewer, and
     other OME-NGFF-aware readers.
 
+    The number of pyramid levels is derived from the smallest spatial
+    dimension, halving until < 64px. Physical scales are propagated
+    across all levels via coordinate transformations.
+
     Parameters
     ----------
     image : array-like
@@ -366,9 +370,6 @@ def write_ome_zarr(
     ------
     ImportError
         If ``ome-zarr`` is not installed.
-    One coordinate transformation is generated per pyramid level. ome-zarr
-    halves XY at each level until the smallest spatial dimension is < 64px;
-    the physical scales are propagated accordingly across all levels.
     """
     import math
     import shutil
@@ -381,11 +382,11 @@ def write_ome_zarr(
     if overwrite and output_path.exists():
         shutil.rmtree(output_path)
 
-    # Match ome-zarr's default pyramid depth: halve XY until min dim < 64px
+    # Halve XY at each pyramid level until smallest spatial dim < 64px
     min_dim = min(image.shape[-2], image.shape[-1])
     n_levels = max(1, math.floor(math.log2(min_dim / 64)) + 1)
 
-    # One transform per pyramid level; XY scale doubles at each level
+    # One transform per level; XY scale doubles at each downsampling step
     coordinate_transformations = [
         [{"type": "scale", "scale": [
             scale[0],
@@ -403,6 +404,7 @@ def write_ome_zarr(
     ome_zarr.writer.write_image(
         image=image,
         group=grp,
+        scale_factors=[2] * (n_levels - 1),
         axes=[
             {"name": "t", "type": "time",    "unit": "second"},
             {"name": "c", "type": "channel"},
