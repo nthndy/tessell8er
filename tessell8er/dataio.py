@@ -345,9 +345,10 @@ def write_ome_zarr(
     structure. Compatible with napari-ome-zarr, Fiji/BigDataViewer, and
     other OME-NGFF-aware readers.
 
-    The number of pyramid levels is derived from the smallest spatial
-    dimension, halving until < 64px. Physical scales are propagated
-    across all levels via coordinate transformations.
+    The pyramid is built via :class:`ome_zarr.scaler.Scaler` (lazy for
+    dask arrays) and passed directly to ``write_image``; the number of
+    coordinate transformations is derived from the pyramid length so it
+    always matches the number of resolution levels written.
 
     Parameters
     ----------
@@ -371,22 +372,24 @@ def write_ome_zarr(
     ImportError
         If ``ome-zarr`` is not installed.
     """
-    import math
     import shutil
 
     import ome_zarr.io
     import ome_zarr.writer
     import zarr
+    from ome_zarr.scaler import Scaler
 
     output_path = Path(output_path)
     if overwrite and output_path.exists():
         shutil.rmtree(output_path)
 
-    # Halve XY at each pyramid level until smallest spatial dim < 64px
-    min_dim = min(image.shape[-2], image.shape[-1])
-    n_levels = max(1, math.floor(math.log2(min_dim / 64)) + 1)
+    # Build pyramid via the same Scaler ome-zarr uses internally;
+    # for dask arrays this is lazy — no compute triggered here.
+    scaler = Scaler()
+    pyramid = scaler.nearest(image)
+    n_levels = len(pyramid)
 
-    # One transform per level; XY scale doubles at each downsampling step
+    # One transform per level; XY scale doubles at each pyramid step
     coordinate_transformations = [
         [{"type": "scale", "scale": [
             scale[0],
@@ -402,9 +405,8 @@ def write_ome_zarr(
     grp = zarr.group(loc.store)
 
     ome_zarr.writer.write_image(
-        image=image,
+        image=pyramid,          # pre-built pyramid skips internal rescaling
         group=grp,
-        scale_factors=[2] * (n_levels - 1),
         axes=[
             {"name": "t", "type": "time",    "unit": "second"},
             {"name": "c", "type": "channel"},
@@ -415,6 +417,174 @@ def write_ome_zarr(
         coordinate_transformations=coordinate_transformations,
         storage_options={"chunks": chunks, "compressor": compressor},
     )
+
+
+def write_plate_zarr(
+    image_dir: "str | Path",
+    metadata: "pd.DataFrame",
+    assay_layout: "pd.DataFrame",
+    output_path: "str | Path",
+    scale: "tuple[float, ...]" = (1.0, 1.0, 1.0, 1.0, 1.0),
+    chunks: "tuple[int, ...]" = (1, 1, 1, 256, 256),
+    n_tile_rows: int = 3,
+    n_tile_cols: int = 3,
+    compressor=None,
+) -> None:
+    """Write a multi-well plate to an OME-NGFF v0.4 HCS compliant Zarr store.
+
+    Iterates over all unique (Row, Col) combinations in ``metadata``,
+    compiles each well as a lazy TCZYX mosaic via
+    :func:`tessell8er.tile.compile_mosaic`, and streams it directly to
+    Zarr without loading into RAM. Plate and per-well condition metadata
+    are written to ``.zattrs`` at the appropriate hierarchy levels.
+
+    Resumable: wells whose field group already contains a ``.zattrs`` file
+    are skipped; partially written wells are cleaned up and rewritten.
+
+    Parameters
+    ----------
+    image_dir : str or Path
+        Directory containing the raw tile TIFFs.
+    metadata : pd.DataFrame
+        Harmony image metadata as returned by
+        :func:`~tessell8er.dataio.read_harmony_metadata`.
+    assay_layout: "pd.DataFrame | None" = None,
+        Assay layout as returned by
+        :func:`~tessell8er.dataio.read_harmony_assaylayout`, with a
+        (Row, Column) MultiIndex.
+    output_path : str or Path
+        Destination ``.zarr`` directory path.
+    scale : tuple[float, ...]
+        Physical pixel scales in (t, c, z, y, x) order; spatial axes in
+        micrometres (default all 1.0).
+    chunks : tuple[int, ...]
+        Chunk shape in TCZYX order (default (1, 1, 1, 256, 256)).
+    n_tile_rows : int
+        Number of tile rows in each mosaic (default 3).
+    n_tile_cols : int
+        Number of tile columns in each mosaic (default 3).
+    compressor : numcodecs compressor or None
+        Zarr compressor; ``None`` disables compression (default).
+    """
+    import math
+    import shutil
+
+    import ome_zarr.io
+    import ome_zarr.writer
+    import zarr
+    from tqdm.auto import tqdm
+
+    from tessell8er import tile as tile_module
+
+    output_path = Path(output_path)
+    wells       = metadata[['Row', 'Col']].drop_duplicates().values
+    rows_sorted = sorted({r for r, _ in wells}, key=int)
+    cols_sorted = sorted({c for _, c in wells}, key=int)
+
+    print(f"Output path  : {output_path}")
+    print(f"Wells found  : {len(wells)}")
+    print(f"Rows         : {rows_sorted}")
+    print(f"Cols         : {cols_sorted}")
+
+    loc  = ome_zarr.io.parse_url(str(output_path), mode='w')
+    root = zarr.group(loc.store)
+
+    if 'plate' not in root.attrs:
+        print("Writing plate-level metadata...")
+        root.attrs.update({
+            'plate': {
+                'version':      '0.4',
+                'name':         output_path.stem,
+                'field_count':  1,
+                'acquisitions': [{'id': 0}],
+                'columns': [{'name': str(c)} for c in cols_sorted],
+                'rows':    [{'name': str(r)} for r in rows_sorted],
+                'wells': [
+                    {
+                        'path':        f'{r}/{c}',
+                        'rowIndex':    rows_sorted.index(r),
+                        'columnIndex': cols_sorted.index(c),
+                    }
+                    for r, c in wells
+                ],
+            },
+            **({'assay_layout': assay_layout.reset_index().to_dict(orient='records')}
+                if assay_layout is not None else {}),        
+        })
+        print("Plate-level metadata written.")
+    else:
+        print("Plate-level metadata already present, skipping.")
+
+    for row, col in tqdm(wells, desc="Writing wells"):
+        field_path  = output_path / str(row) / str(col) / '0'
+        zattrs_path = field_path / '.zattrs'
+
+        if zattrs_path.exists():
+            print(f"  [{row},{col}] Skipping — already complete")
+            continue
+
+        if field_path.exists():
+            print(f"  [{row},{col}] Partial write detected, cleaning up...")
+            shutil.rmtree(field_path)
+
+        print(f"  [{row},{col}] Compiling mosaic...")
+        images = tile_module.compile_mosaic(
+            image_dir=image_dir,
+            metadata=metadata,
+            row=int(row), col=int(col),
+            n_tile_rows=n_tile_rows,
+            n_tile_cols=n_tile_cols,
+        )
+        print(f"  [{row},{col}] Mosaic shape: {images.shape}, dtype: {images.dtype}")
+
+        layout_row = assay_layout.loc[(int(row), int(col))]
+
+        well_grp = root.require_group(f'{row}/{col}')
+        # per-well — skip condition block if no layout provided
+        if assay_layout is not None:
+            layout_row = assay_layout.loc[(int(row), int(col))]
+            well_grp.attrs.update({
+                'well':      {'version': '0.4', 'images': [{'path': '0', 'acquisition': 0}]},
+                'condition': layout_row.to_dict(),
+            })
+            print(f"  [{row},{col}] Done — {layout_row.to_dict()}")
+        else:
+            well_grp.attrs.update({
+                'well': {'version': '0.4', 'images': [{'path': '0', 'acquisition': 0}]},
+            })
+            print(f"  [{row},{col}] Done")
+
+        img_grp  = well_grp.require_group('0')
+        min_dim  = min(images.shape[-2], images.shape[-1])
+        n_levels = max(1, math.floor(math.log2(min_dim / 64)) + 1)
+        print(f"  [{row},{col}] Writing {n_levels} pyramid levels...")
+
+        coordinate_transformations = [
+            [{'type': 'scale', 'scale': [
+                scale[0], scale[1], scale[2],
+                scale[3] * (2 ** i),
+                scale[4] * (2 ** i),
+            ]}]
+            for i in range(n_levels)
+        ]
+
+        ome_zarr.writer.write_image(
+            image=images,
+            group=img_grp,
+            scale_factors=[2] * (n_levels - 1),
+            axes=[
+                {'name': 't', 'type': 'time',    'unit': 'second'},
+                {'name': 'c', 'type': 'channel'},
+                {'name': 'z', 'type': 'space',   'unit': 'micrometer'},
+                {'name': 'y', 'type': 'space',   'unit': 'micrometer'},
+                {'name': 'x', 'type': 'space',   'unit': 'micrometer'},
+            ],
+            coordinate_transformations=coordinate_transformations,
+            storage_options={'chunks': chunks, 'compressor': compressor},
+        )
+        print(f"  [{row},{col}] Done — {layout_row.to_dict()}")
+
+    print(f"\nPlate write complete: {output_path}")
 
 
 # ---------------------------------------------------------------------------
