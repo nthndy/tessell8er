@@ -422,8 +422,8 @@ def write_ome_zarr(
 def write_plate_zarr(
     image_dir: "str | Path",
     metadata: "pd.DataFrame",
-    assay_layout: "pd.DataFrame",
-    output_path: "str | Path",
+    assay_layout: "pd.DataFrame | None" = None,
+    output_path: "str | Path" = "plate.zarr",
     scale: "tuple[float, ...]" = (1.0, 1.0, 1.0, 1.0, 1.0),
     chunks: "tuple[int, ...]" = (1, 1, 1, 256, 256),
     n_tile_rows: int = 3,
@@ -448,10 +448,10 @@ def write_plate_zarr(
     metadata : pd.DataFrame
         Harmony image metadata as returned by
         :func:`~tessell8er.dataio.read_harmony_metadata`.
-    assay_layout: "pd.DataFrame | None" = None,
+    assay_layout : pd.DataFrame or None
         Assay layout as returned by
         :func:`~tessell8er.dataio.read_harmony_assaylayout`, with a
-        (Row, Column) MultiIndex.
+        (Row, Column) MultiIndex. If None, condition metadata is omitted.
     output_path : str or Path
         Destination ``.zarr`` directory path.
     scale : tuple[float, ...]
@@ -509,13 +509,14 @@ def write_plate_zarr(
                 ],
             },
             **({'assay_layout': assay_layout.reset_index().to_dict(orient='records')}
-                if assay_layout is not None else {}),        
+               if assay_layout is not None else {}),
         })
         print("Plate-level metadata written.")
     else:
         print("Plate-level metadata already present, skipping.")
 
     for row, col in tqdm(wells, desc="Writing wells"):
+        print(f"\n  [{row},{col}] Starting well...")
         field_path  = output_path / str(row) / str(col) / '0'
         zattrs_path = field_path / '.zattrs'
 
@@ -537,22 +538,18 @@ def write_plate_zarr(
         )
         print(f"  [{row},{col}] Mosaic shape: {images.shape}, dtype: {images.dtype}")
 
-        layout_row = assay_layout.loc[(int(row), int(col))]
-
-        well_grp = root.require_group(f'{row}/{col}')
-        # per-well — skip condition block if no layout provided
         if assay_layout is not None:
             layout_row = assay_layout.loc[(int(row), int(col))]
+            well_grp = root.require_group(f'{row}/{col}')
             well_grp.attrs.update({
                 'well':      {'version': '0.4', 'images': [{'path': '0', 'acquisition': 0}]},
                 'condition': layout_row.to_dict(),
             })
-            print(f"  [{row},{col}] Done — {layout_row.to_dict()}")
         else:
+            well_grp = root.require_group(f'{row}/{col}')
             well_grp.attrs.update({
                 'well': {'version': '0.4', 'images': [{'path': '0', 'acquisition': 0}]},
             })
-            print(f"  [{row},{col}] Done")
 
         img_grp  = well_grp.require_group('0')
         min_dim  = min(images.shape[-2], images.shape[-1])
@@ -582,7 +579,11 @@ def write_plate_zarr(
             coordinate_transformations=coordinate_transformations,
             storage_options={'chunks': chunks, 'compressor': compressor},
         )
-        print(f"  [{row},{col}] Done — {layout_row.to_dict()}")
+
+        if assay_layout is not None:
+            print(f"  [{row},{col}] Done — {layout_row.to_dict()}")
+        else:
+            print(f"  [{row},{col}] Done")
 
     print(f"\nPlate write complete: {output_path}")
 
