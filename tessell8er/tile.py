@@ -79,6 +79,115 @@ def find_files_exist(fns: list[str], image_dir: str) -> None:
             )
 
 
+def _plane_present(
+    metadata: pd.DataFrame,
+    image_dir: os.PathLike,
+    row: str,
+    col: str,
+    channel: int,
+    plane: int,
+    n_probe: int = 3,
+) -> bool:
+    """Return True if at least one tile for this channel/plane exists on disk.
+
+    Plane availability is structural: it is constant across fields and
+    timepoints, so probing the first `n_probe` field URLs settles it without
+    a full directory scan. `any` short-circuits on the first hit, so a real
+    plane costs a single stat call while a phantom plane costs `n_probe`.
+
+    Parameters
+    ----------
+    metadata : pd.DataFrame
+        Harmony metadata DataFrame.
+    image_dir : os.PathLike
+        Directory containing the raw tile images.
+    row, col : str
+        Well position (as strings, matching metadata dtype).
+    channel : int
+        ChannelID to probe.
+    plane : int
+        PlaneID to probe.
+    n_probe : int
+        Number of field URLs to test before concluding the plane is absent.
+
+    Returns
+    -------
+    bool
+        True if any probed tile for (channel, plane) exists on disk.
+    """
+    urls = metadata['URL'][
+        (metadata['ChannelID'] == str(channel))
+        & (metadata['PlaneID'] == str(plane))
+        & (metadata['Row'] == str(row))
+        & (metadata['Col'] == str(col))
+    ]
+    return any(
+        os.path.exists(os.path.join(str(image_dir), u)) for u in urls.iloc[:n_probe]
+    )
+
+
+def resolve_plane_map(
+    metadata: pd.DataFrame,
+    image_dir: os.PathLike,
+    row: str,
+    col: str,
+    channel_IDs,
+    plane_IDs,
+    n_probe: int = 3,
+) -> dict:
+    """Map every requested (channel, plane) to a plane that exists on disk.
+
+    Some channels are enumerated by Harmony with more Z-planes than were
+    physically acquired. Differential phase contrast (DPC) and single-focus
+    brightfield are the common cases: the metadata lists every PlaneID (all
+    sharing one focal position) but only one plane has tiles on disk. Asking
+    `stitch` for an absent plane yields an empty file list and an IndexError.
+
+    This builds a per-channel remap so that phantom planes resolve to the
+    channel's first on-disk plane, while channels with a genuine Z-stack get
+    an identity map. The (T, C, Z) request grid stays rectangular, so the
+    downstream reshape in `compile_mosaic` is unchanged and DPC contributes
+    its single real plane to every Z slot.
+
+    Parameters
+    ----------
+    metadata : pd.DataFrame
+        Harmony metadata DataFrame.
+    image_dir : os.PathLike
+        Directory containing the raw tile images.
+    row, col : str
+        Well position (as strings, matching metadata dtype).
+    channel_IDs : iterable
+        Channel IDs to resolve.
+    plane_IDs : iterable
+        Plane IDs requested.
+    n_probe : int
+        Field URLs to probe per (channel, plane) when testing presence.
+
+    Returns
+    -------
+    dict
+        Nested mapping {channel: {requested_plane: on_disk_plane}}.
+
+    Raises
+    ------
+    FileNotFoundError
+        If a channel has no planes present on disk at all.
+    """
+    plane_map = {}
+    for ch in channel_IDs:
+        present = [
+            p for p in plane_IDs
+            if _plane_present(metadata, image_dir, row, col, ch, p, n_probe)
+        ]
+        if not present:
+            raise FileNotFoundError(
+                f"channel {ch}: no requested planes present on disk for r{row}c{col}"
+            )
+        plane_map[ch] = {p: (p if p in present else present[0]) for p in plane_IDs}
+    return plane_map
+
+
 def compile_mosaic(
     image_dir: os.PathLike,
     metadata: pd.DataFrame,
@@ -102,6 +211,13 @@ def compile_mosaic(
     For non-square mosaics or when stitching a subset of fields, supply
     `subset_field_IDs` and the matching `n_tile_rows` / `n_tile_cols`.
 
+    Channels whose metadata over-enumerates Z-planes (e.g. DPC or single-focus
+    brightfield, where every PlaneID shares one focal position but only one
+    plane has tiles on disk) are handled automatically: the absent planes are
+    resolved to the channel's on-disk plane via :func:`resolve_plane_map`, so
+    no phantom-plane lookup is attempted and the single real plane is broadcast
+    across the channel's Z slots.
+
     Parameters
     ----------
     image_dir : os.PathLike
@@ -116,6 +232,8 @@ def compile_mosaic(
         Optional per-tile pre-processing functions applied on load.
     set_plane : int, 'max_proj', 'sum_proj', or None
         Z-plane selector. Pass a string for Z-projections; None uses all planes.
+        An explicit plane absent for a given channel resolves to that channel's
+        on-disk plane.
     set_channel : int or None
         Channel selector; None uses all channels.
     set_time : int or None
@@ -175,14 +293,20 @@ def compile_mosaic(
         n_tile_rows = n_tile_cols = np.sqrt(number_tiles)
 
     tile_size = int(metadata['ImageSizeX'].max())
-    final_image_size(tile_size, overlap_percentage, n_tile_rows, n_tile_cols)
+    image_size = final_image_size(tile_size, overlap_percentage, n_tile_rows, n_tile_cols)
 
     load_transform_image = partial(load_image, transforms=input_transforms)
 
+    plane_map = resolve_plane_map(
+        metadata, image_dir, str(row), str(col), channel_IDs, plane_IDs
+    )
+
+    # Defer each stitch so graph construction stays lazy; the geometry/STRtree
+    # setup runs per-frame at compute time, not eagerly for all T x C x Z frames.
     images = [
-        stitch(
+        dask.delayed(stitch)(
             load_transform_image, metadata, image_dir,
-            time, plane, channel, str(row), str(col),
+            time, plane_map[channel][plane], channel, str(row), str(col),
             n_tile_rows, n_tile_cols, subset_field_IDs,
         )[0]
         for time    in timepoint_IDs
@@ -190,6 +314,10 @@ def compile_mosaic(
         for plane   in plane_IDs
     ]
 
+    # from_delayed turns each delayed frame into a concrete da.Array, so the
+    # stack below is a single lazy array computable in one .compute() call,
+    # not a dask-array-of-delayed that needs computing twice.
+    images = [da.from_delayed(frame, shape=image_size, dtype=dtype) for frame in images]
     images = [frame.rechunk(tile_size, tile_size) for frame in images]
     images = da.stack(images, axis=0)
     images = images.reshape((
@@ -258,8 +386,8 @@ def stitch(
 
     fns = filtered_df['URL']
     find_files_exist(fns, image_dir)
-    fns = [glob.glob(os.path.join(image_dir, fn))[0] for fn in fns
-           if os.path.exists(os.path.join(image_dir, fn))]
+    fns = [os.path.join(image_dir, fn) for fn in fns
+       if os.path.exists(os.path.join(image_dir, fn))]
 
     sample = imread(fns[0])
     _fuse_func = partial(fuse_func, imload_fn=load_transform_image, dtype=sample.dtype)
