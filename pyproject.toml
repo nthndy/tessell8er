@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tessell8er"
-version = "0.1.1"
+version = "0.1.2"
 description = "Lazy Dask-based image tiling and stitching for Harmony/Opera Phenix microscopy data."
 authors = [{ name = "Nathan J. Day", email = "nathan.day@crick.ac.uk" }]
 license = { text = "MIT" }

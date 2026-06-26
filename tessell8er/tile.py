@@ -293,18 +293,27 @@ def compile_mosaic(
         n_tile_rows = n_tile_cols = np.sqrt(number_tiles)
 
     tile_size = int(metadata['ImageSizeX'].max())
-    image_size = final_image_size(tile_size, overlap_percentage, n_tile_rows, n_tile_cols)
+    # NOTE: montage size is derived purely from tile stage positions inside
+    # `stitch` (stitched_shape = bbox max - min), which already encodes the real
+    # physical overlap. The old `final_image_size(...)` call computed a parallel,
+    # overlap_percentage-based size that could disagree with the position-derived
+    # size and corrupt the reshape (e.g. a 10%-overlap acquisition passed
+    # overlap_percentage=0.01 produced a mismatched montage dimension and the
+    # reshape failed with "total size of new array must be unchanged").
+    # Size is now single-sourced from positions; overlap_percentage is retained
+    # in the signature for backwards compatibility but no longer affects output.
 
     load_transform_image = partial(load_image, transforms=input_transforms)
 
+    # Resolve requested planes against what is actually on disk per channel.
+    # Phantom planes (DPC / single-focus brightfield over-enumerated by Harmony)
+    # map to the channel's real plane; genuine Z-stacks map to themselves.
     plane_map = resolve_plane_map(
         metadata, image_dir, str(row), str(col), channel_IDs, plane_IDs
     )
 
-    # Defer each stitch so graph construction stays lazy; the geometry/STRtree
-    # setup runs per-frame at compute time, not eagerly for all T x C x Z frames.
     images = [
-        dask.delayed(stitch)(
+        stitch(
             load_transform_image, metadata, image_dir,
             time, plane_map[channel][plane], channel, str(row), str(col),
             n_tile_rows, n_tile_cols, subset_field_IDs,
@@ -314,10 +323,6 @@ def compile_mosaic(
         for plane   in plane_IDs
     ]
 
-    # from_delayed turns each delayed frame into a concrete da.Array, so the
-    # stack below is a single lazy array computable in one .compute() call,
-    # not a dask-array-of-delayed that needs computing twice.
-    images = [da.from_delayed(frame, shape=image_size, dtype=dtype) for frame in images]
     images = [frame.rechunk(tile_size, tile_size) for frame in images]
     images = da.stack(images, axis=0)
     images = images.reshape((
@@ -386,8 +391,8 @@ def stitch(
 
     fns = filtered_df['URL']
     find_files_exist(fns, image_dir)
-    fns = [os.path.join(image_dir, fn) for fn in fns
-       if os.path.exists(os.path.join(image_dir, fn))]
+    fns = [glob.glob(os.path.join(image_dir, fn))[0] for fn in fns
+           if os.path.exists(os.path.join(image_dir, fn))]
 
     sample = imread(fns[0])
     _fuse_func = partial(fuse_func, imload_fn=load_transform_image, dtype=sample.dtype)
